@@ -15,52 +15,32 @@ class SystemPipelineManager:
         self.ollama_url = f"http://localhost:{ollama_port}"
 
     def _find_ollama_cmd(self):
-        """Detecta la ruta del ejecutable de Ollama."""
         cmd = shutil.which("ollama")
         if cmd:
             return cmd
-        
+        candidates = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _find_docker_cmd(self):
+        """Busca el ejecutable de Docker en las rutas comunes de macOS."""
+        cmd = shutil.which("docker")
+        if cmd:
+            return cmd
         candidates = [
-            "/opt/homebrew/bin/ollama",
-            "/usr/local/bin/ollama",
-            "/usr/bin/ollama"
+            "/opt/homebrew/bin/docker",
+            "/usr/local/bin/docker",
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+            os.path.expanduser("~/.docker/bin/docker")
         ]
         for candidate in candidates:
             if os.path.exists(candidate):
                 return candidate
         return None
 
-    def _install_ollama_automatically(self):
-        """Instala Ollama en macOS de forma 100% transparente."""
-        print("[Pipeline] 🚀 Ollama no está instalado. Instalando automáticamente en tu Mac...")
-        
-        # 1. Intentar instalación vía Homebrew si está disponible
-        brew_bin = shutil.which("brew") or ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else None)
-        if brew_bin:
-            print("[Pipeline] 📦 Instalando Ollama mediante Homebrew...")
-            try:
-                subprocess.run([brew_bin, "install", "ollama"], check=True)
-                print("[Pipeline] ✅ Ollama instalado con éxito vía Homebrew.")
-                return True
-            except Exception as e:
-                print(f"[Pipeline] ⚠️ Homebrew falló ({e}). Intentando descarga directa...")
-
-        # 2. Descarga e instalación directa en /Applications
-        print("[Pipeline] 📥 Descargando e instalando Ollama oficial para macOS...")
-        zip_path = "/tmp/Ollama-darwin.zip"
-        try:
-            subprocess.run(["curl", "-L", "https://ollama.com/download/Ollama-darwin.zip", "-o", zip_path], check=True)
-            subprocess.run(["unzip", "-o", zip_path, "-d", "/Applications/"], check=True)
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-            print("[Pipeline] ✅ Ollama instalado con éxito en /Applications/Ollama.app")
-            return True
-        except Exception as e:
-            print(f"[Pipeline] ❌ Error en la instalación automática de Ollama: {e}")
-            return False
-
     def _wait_for_service(self, url, timeout=15):
-        """Revisa activamente hasta que el puerto responda."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
@@ -80,18 +60,9 @@ class SystemPipelineManager:
         print("[Pipeline] ✅ Toda la infraestructura está lista y operativa.\n")
 
     def _ensure_ollama_and_model(self):
-        # 1. Comprobar si responde
         if not self._wait_for_service(f"{self.ollama_url}/api/tags", timeout=2):
             ollama_bin = self._find_ollama_cmd()
             has_app = os.path.exists("/Applications/Ollama.app")
-
-            # Si no existe ni el binario ni la App, instalar automáticamente
-            if not ollama_bin and not has_app:
-                success = self._install_ollama_automatically()
-                if not success:
-                    sys.exit(1)
-                ollama_bin = self._find_ollama_cmd()
-                has_app = os.path.exists("/Applications/Ollama.app")
 
             print("[Pipeline] ⚠️ Iniciando servicio Ollama en segundo plano...")
             if ollama_bin:
@@ -99,17 +70,15 @@ class SystemPipelineManager:
             elif has_app:
                 subprocess.Popen(["open", "-a", "Ollama"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            print("[Pipeline] ⏳ Esperando respuesta del servicio Ollama...")
             if not self._wait_for_service(f"{self.ollama_url}/api/tags", timeout=20):
-                print("[Pipeline] ❌ No se pudo conectar con Ollama tras la instalación.")
+                print("[Pipeline] ❌ No se pudo conectar con Ollama.")
                 sys.exit(1)
 
-        # 2. Descargar modelo automáticamente si no está en local
         try:
             res = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             models = [m.get("name") for m in res.json().get("models", [])]
             if not any(self.model_name in m for m in models):
-                print(f"[Pipeline] ⏳ Modelo '{self.model_name}' no presente. Descargando automáticamente (ollama pull)...")
+                print(f"[Pipeline] ⏳ Modelo '{self.model_name}' no presente. Descargando automáticamente...")
                 ollama_bin = self._find_ollama_cmd() or "ollama"
                 subprocess.run([ollama_bin, "pull", self.model_name], check=True)
                 print(f"[Pipeline] ✅ Modelo '{self.model_name}' descargado y listo.")
@@ -119,31 +88,111 @@ class SystemPipelineManager:
             print(f"[Pipeline] ❌ Error al verificar modelo en Ollama: {e}")
             sys.exit(1)
 
+    def _install_docker_automatically(self):
+        """Instala Docker Desktop en macOS automáticamente."""
+        print("[Pipeline] 🚀 Docker no está instalado. Instalando automáticamente en tu Mac...")
+        brew_bin = shutil.which("brew") or ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else None)
+        if brew_bin:
+            print("[Pipeline] 📦 Instalando Docker Desktop mediante Homebrew...")
+            try:
+                subprocess.run([brew_bin, "install", "--cask", "docker"], check=True)
+                print("[Pipeline] ✅ Docker Desktop instalado vía Homebrew.")
+                return True
+            except Exception as e:
+                print(f"[Pipeline] ⚠️ Homebrew falló ({e}). Intentando descarga directa...")
+
+        dmg_path = "/tmp/Docker.dmg"
+        mount_point = "/Volumes/Docker"
+        try:
+            print("[Pipeline] 📥 Descargando Docker Desktop para Apple Silicon...")
+            url = "https://desktop.docker.com/mac/main/arm64/Docker.dmg"
+            subprocess.run(["curl", "-L", url, "-o", dmg_path], check=True)
+            print("[Pipeline] 📦 Instalando Docker.app en /Applications...")
+            subprocess.run(["hdiutil", "attach", dmg_path], check=True)
+            subprocess.run(["cp", "-R", f"{mount_point}/Docker.app", "/Applications/"], check=True)
+            subprocess.run(["hdiutil", "detach", mount_point], check=True)
+            if os.path.exists(dmg_path):
+                os.remove(dmg_path)
+            print("[Pipeline] ✅ Docker Desktop instalado con éxito en /Applications/Docker.app")
+            return True
+        except Exception as e:
+            print(f"[Pipeline] ❌ Error en la instalación automática de Docker: {e}")
+            return False
+
+    def _ensure_docker_daemon(self):
+        """Garantiza la disponibilidad del ejecutable y servicio Docker."""
+        docker_bin = self._find_docker_cmd()
+        has_app = os.path.exists("/Applications/Docker.app")
+
+        if not docker_bin and not has_app:
+            if not self._install_docker_automatically():
+                return False
+            docker_bin = self._find_docker_cmd()
+            has_app = os.path.exists("/Applications/Docker.app")
+
+        docker_cmd = docker_bin or "docker"
+
+        # Verificar si el daemon ya está respondiendo
+        try:
+            res = subprocess.run([docker_cmd, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return True
+        except FileNotFoundError:
+            pass
+
+        print("[Pipeline] ⚠️ Docker Desktop no está en ejecución. Iniciándolo automáticamente...")
+        if has_app:
+            subprocess.run(["open", "-a", "Docker"])
+
+        print("[Pipeline] ⏳ Esperando respuesta del servicio Docker...")
+        start_time = time.time()
+        while time.time() - start_time < 45:
+            if not docker_bin:
+                docker_bin = self._find_docker_cmd()
+                docker_cmd = docker_bin or "docker"
+            try:
+                res = subprocess.run([docker_cmd, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if res.returncode == 0:
+                    print("[Pipeline] ✅ Daemon de Docker activo.")
+                    return True
+            except FileNotFoundError:
+                pass
+            time.sleep(3)
+        return False
+
     def _ensure_searxng_container(self):
         if self._wait_for_service(f"{self.searxng_url}/search?q=ping&format=json", timeout=2):
             print("[Pipeline] ✔️ SearXNG corriendo en puerto 8080.")
             return
 
-        print("[Pipeline] ⚠️ SearXNG no responde. Levantar contenedor Docker...")
+        if not self._ensure_docker_daemon():
+            print("[Pipeline] ⚠️ No se pudo inicializar Docker. Las búsquedas locales se omitirán temporalmente.")
+            return
+
+        docker_bin = self._find_docker_cmd() or "docker"
+
+        print("[Pipeline] 🚀 Desplegando contenedor SearXNG en Docker...")
         try:
-            check_cmd = subprocess.run(["docker", "ps", "-a", "--filter", "name=searxng", "--format", "{{.Names}}"], capture_output=True, text=True)
+            check_cmd = subprocess.run([docker_bin, "ps", "-a", "--filter", "name=searxng", "--format", "{{.Names}}"], capture_output=True, text=True)
             if "searxng" in check_cmd.stdout:
-                subprocess.run(["docker", "start", "searxng"], stdout=subprocess.DEVNULL)
+                subprocess.run([docker_bin, "start", "searxng"], stdout=subprocess.DEVNULL)
             else:
                 subprocess.run([
-                    "docker", "run", "-d",
+                    docker_bin, "run", "-d",
                     "-p", "8080:8080",
                     "--name", "searxng",
                     "searxng/searxng"
                 ], stdout=subprocess.DEVNULL)
             
-            if self._wait_for_service(f"{self.searxng_url}/search?q=ping&format=json", timeout=10):
+            if self._wait_for_service(f"{self.searxng_url}/search?q=ping&format=json", timeout=15):
                 print("[Pipeline] ✅ SearXNG desplegado en Docker.")
-        except FileNotFoundError:
-            print("[Pipeline] ⚠️ Docker no instalado/corriendo. Inicia Docker Desktop si requieres búsquedas.")
+            else:
+                print("[Pipeline] ⚠️ SearXNG tardó en responder en el puerto 8080.")
+        except Exception as e:
+            print(f"[Pipeline] ⚠️ Error al desplegar SearXNG: {e}")
 
     def _ensure_firecrawl_container(self):
         if self._wait_for_service(f"{self.firecrawl_url}/is-healthy", timeout=2):
             print("[Pipeline] ✔️ Firecrawl activo en puerto 3002.")
             return
-        print("[Pipeline] ℹ️ Firecrawl no detectado en puerto 3002.")
+        print("[Pipeline] ℹ️ Firecrawl no detectado en puerto 3002 (Opcional).")

@@ -1,0 +1,9 @@
+use_default_settings: true
+server:
+  secret_key: "localnaut_secret_key_123456789"
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json

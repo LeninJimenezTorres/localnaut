@@ -25,7 +25,6 @@ class SystemPipelineManager:
         return None
 
     def _find_docker_cmd(self):
-        """Busca el ejecutable de Docker en las rutas comunes de macOS."""
         cmd = shutil.which("docker")
         if cmd:
             return cmd
@@ -88,106 +87,33 @@ class SystemPipelineManager:
             print(f"[Pipeline] ❌ Error al verificar modelo en Ollama: {e}")
             sys.exit(1)
 
-    def _install_docker_automatically(self):
-        """Instala Docker Desktop en macOS automáticamente."""
-        print("[Pipeline] 🚀 Docker no está instalado. Instalando automáticamente en tu Mac...")
-        brew_bin = shutil.which("brew") or ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else None)
-        if brew_bin:
-            print("[Pipeline] 📦 Instalando Docker Desktop mediante Homebrew...")
-            try:
-                subprocess.run([brew_bin, "install", "--cask", "docker"], check=True)
-                print("[Pipeline] ✅ Docker Desktop instalado vía Homebrew.")
-                return True
-            except Exception as e:
-                print(f"[Pipeline] ⚠️ Homebrew falló ({e}). Intentando descarga directa...")
-
-        dmg_path = "/tmp/Docker.dmg"
-        mount_point = "/Volumes/Docker"
-        try:
-            print("[Pipeline] 📥 Descargando Docker Desktop para Apple Silicon...")
-            url = "https://desktop.docker.com/mac/main/arm64/Docker.dmg"
-            subprocess.run(["curl", "-L", url, "-o", dmg_path], check=True)
-            print("[Pipeline] 📦 Instalando Docker.app en /Applications...")
-            subprocess.run(["hdiutil", "attach", dmg_path], check=True)
-            subprocess.run(["cp", "-R", f"{mount_point}/Docker.app", "/Applications/"], check=True)
-            subprocess.run(["hdiutil", "detach", mount_point], check=True)
-            if os.path.exists(dmg_path):
-                os.remove(dmg_path)
-            print("[Pipeline] ✅ Docker Desktop instalado con éxito en /Applications/Docker.app")
-            return True
-        except Exception as e:
-            print(f"[Pipeline] ❌ Error en la instalación automática de Docker: {e}")
-            return False
-
-    def _ensure_docker_daemon(self):
-        """Garantiza la disponibilidad del ejecutable y servicio Docker."""
-        docker_bin = self._find_docker_cmd()
-        has_app = os.path.exists("/Applications/Docker.app")
-
-        if not docker_bin and not has_app:
-            if not self._install_docker_automatically():
-                return False
-            docker_bin = self._find_docker_cmd()
-            has_app = os.path.exists("/Applications/Docker.app")
-
-        docker_cmd = docker_bin or "docker"
-
-        # Verificar si el daemon ya está respondiendo
-        try:
-            res = subprocess.run([docker_cmd, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if res.returncode == 0:
-                return True
-        except FileNotFoundError:
-            pass
-
-        print("[Pipeline] ⚠️ Docker Desktop no está en ejecución. Iniciándolo automáticamente...")
-        if has_app:
-            subprocess.run(["open", "-a", "Docker"])
-
-        print("[Pipeline] ⏳ Esperando respuesta del servicio Docker...")
-        start_time = time.time()
-        while time.time() - start_time < 45:
-            if not docker_bin:
-                docker_bin = self._find_docker_cmd()
-                docker_cmd = docker_bin or "docker"
-            try:
-                res = subprocess.run([docker_cmd, "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if res.returncode == 0:
-                    print("[Pipeline] ✅ Daemon de Docker activo.")
-                    return True
-            except FileNotFoundError:
-                pass
-            time.sleep(3)
-        return False
-
     def _ensure_searxng_container(self):
+        # Comprobar si SearXNG ya está respondiendo a consultas JSON
         if self._wait_for_service(f"{self.searxng_url}/search?q=ping&format=json", timeout=2):
-            print("[Pipeline] ✔️ SearXNG corriendo en puerto 8080.")
-            return
-
-        if not self._ensure_docker_daemon():
-            print("[Pipeline] ⚠️ No se pudo inicializar Docker. Las búsquedas locales se omitirán temporalmente.")
+            print("[Pipeline] ✔️ SearXNG corriendo con soporte JSON activo en puerto 8080.")
             return
 
         docker_bin = self._find_docker_cmd() or "docker"
+        settings_path = os.path.abspath("searxng/settings.yml")
 
-        print("[Pipeline] 🚀 Desplegando contenedor SearXNG en Docker...")
+        print("[Pipeline] ⚙️ Reconfigurando contenedor SearXNG con soporte JSON...")
         try:
-            check_cmd = subprocess.run([docker_bin, "ps", "-a", "--filter", "name=searxng", "--format", "{{.Names}}"], capture_output=True, text=True)
-            if "searxng" in check_cmd.stdout:
-                subprocess.run([docker_bin, "start", "searxng"], stdout=subprocess.DEVNULL)
-            else:
-                subprocess.run([
-                    docker_bin, "run", "-d",
-                    "-p", "8080:8080",
-                    "--name", "searxng",
-                    "searxng/searxng"
-                ], stdout=subprocess.DEVNULL)
+            # Eliminar contenedor previo si existía sin soporte JSON
+            subprocess.run([docker_bin, "rm", "-f", "searxng"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Lanzar SearXNG con el volumen de configuración montado
+            subprocess.run([
+                docker_bin, "run", "-d",
+                "-p", "8080:8080",
+                "-v", f"{settings_path}:/etc/searxng/settings.yml",
+                "--name", "searxng",
+                "searxng/searxng"
+            ], check=True, stdout=subprocess.DEVNULL)
             
             if self._wait_for_service(f"{self.searxng_url}/search?q=ping&format=json", timeout=15):
-                print("[Pipeline] ✅ SearXNG desplegado en Docker.")
+                print("[Pipeline] ✅ SearXNG desplegado y verificado con soporte JSON.")
             else:
-                print("[Pipeline] ⚠️ SearXNG tardó en responder en el puerto 8080.")
+                print("[Pipeline] ⚠️ SearXNG desplegado pero aún inicializando...")
         except Exception as e:
             print(f"[Pipeline] ⚠️ Error al desplegar SearXNG: {e}")
 

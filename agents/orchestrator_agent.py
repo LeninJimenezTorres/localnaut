@@ -1,52 +1,47 @@
 import json
+import re
 from core.llm_gateway import LocalLLMGateway
 from tools.search_tool import search_internet
 
 class LocalNautOrchestrator:
-    """Orquestador con bucle completo de ejecución de herramientas."""
+    """Orquestador de agentes con memoria de sesión y llamadas a herramientas."""
     
     def __init__(self):
         self.llm = LocalLLMGateway()
 
-    def run(self, user_prompt: str) -> str:
-        print("\n[LocalNaut] 🧠 Analizando la consulta e identificando intención...")
-        
-        system_prompt = (
-            "Eres LocalNaut, un asistente de IA avanzado y local. "
-            "Tienes acceso a la herramienta 'search_internet(query)'. "
-            "Si la consulta del usuario requiere información actualizada o búsquedas en la web, "
-            "DEBES responder EXCLUSIVAMENTE con un JSON con el siguiente formato estricto:\n"
-            '{"name": "search_internet", "arguments": {"query": "<busqueda>"}}\n\n'
-            "Si NO requieres búsqueda web, responde directamente al usuario en texto plano."
-        )
+    def process_turn(self, session, user_input: str, status_callback=None) -> str:
+        session.add_user_message(user_input)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        if status_callback:
+            status_callback("🧠 Analizando consulta e intenciones...")
 
-        response_content = self.llm.chat(messages)
+        # Primera evaluación del modelo
+        response = self.llm.chat(session.messages)
 
-        # Intentar detectar si el modelo devolvió una llamada a herramienta
-        try:
-            cleaned_response = response_content.strip()
-            if cleaned_response.startswith("```json"):
-                cleaned_response = cleaned_response.replace("```json", "").replace("```", "").strip()
-            
-            action = json.loads(cleaned_response)
-            if isinstance(action, dict) and action.get("name") == "search_internet":
-                search_query = action.get("arguments", {}).get("query", user_prompt)
-                
-                print(f"[LocalNaut] 🌐 Ejecutando búsqueda local en SearXNG: '{search_query}'...")
-                search_results = search_internet(search_query)
+        # Detectar si el modelo solicitó una búsqueda web
+        search_match = re.search(r'search_internet\((?:query=)?["\'](.*?)["\']\)', response) or \
+                       re.search(r'\{\s*"name":\s*"search_internet",\s*"arguments":\s*\{\s*"query":\s*"(.*?)"\s*\}\s*\}', response)
 
-                print("[LocalNaut] 📝 Sintetizando y redactando respuesta final...")
-                synthesis_messages = [
-                    {"role": "system", "content": "Eres un asistente experto. Resume y responde a la solicitud del usuario utilizando ÚNICAMENTE la siguiente información extraída de internet de forma clara, profesional y estructurada en español."},
-                    {"role": "user", "content": f"Solicitud original: {user_prompt}\n\nResultados de la búsqueda web:\n{search_results}"}
-                ]
-                return self.llm.chat(synthesis_messages)
-        except (json.JSONDecodeError, AttributeError):
-            pass
+        if search_match:
+            query = search_match.group(1)
 
-        return response_content
+            # Guardar la invocación del asistente en el historial
+            session.add_assistant_message(response)
+
+            if status_callback:
+                status_callback(f"🌐 Consultando SearXNG local: '{query}'...")
+
+            # Ejecutar búsqueda en SearXNG
+            search_results = search_internet(query)
+
+            # Inyectar el resultado en la sesión
+            session.add_tool_response("search_internet", search_results)
+
+            if status_callback:
+                status_callback("📝 Sintetizando respuesta con datos web...")
+
+            # Generar la respuesta final sintetizada
+            response = self.llm.chat(session.messages)
+
+        session.add_assistant_message(response)
+        return response
